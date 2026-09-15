@@ -103,16 +103,21 @@ function dateKey(d=new Date()){
 }
 function save(){localStorage.setItem(KEY,JSON.stringify(logs));}
 function today(cat){
-  const k=dateKey(); return logs.filter(x=>x.date===k&&x.category===cat).reduce((a,x)=>a+x.seconds,0);
+  const k=dateKey();
+  return logs.filter(x=>(x.date||x.practice_date)===k&&x.category===cat)
+             .reduce((a,x)=>a+x.seconds,0);
 }
 function render(){
   $("todayJazz").textContent=minutes(today("jazz"));
   $("todaySeller").textContent=minutes(today("seller"));
   $("todayTotal").textContent=minutes(today("jazz")+today("seller"));
   const recent=[...logs].reverse().slice(0,20);
-  $("logs").innerHTML=recent.length?recent.map(x=>`
-    <div class="log"><div><b>${x.category==="jazz"?"🎹 ジャズ":"📚 登録販売者"}</b><div class="small">${x.date} ${x.time}</div></div>
-    <b>${fmt(x.seconds)}</b></div>`).join(""):"<p class='small'>まだ記録がありません。</p>";
+  $("logs").innerHTML=recent.length?recent.map(x=>{
+    const d=x.date||x.practice_date||"";
+    const t=x.time||"";
+    return `<div class="log"><div><b>${x.category==="jazz"?"🎹 ジャズ":"📚 登録販売者"}</b><div class="small">${d} ${t}</div></div>
+    <b>${fmt(x.seconds)}</b></div>`;
+  }).join(""):"<p class='small'>まだ記録がありません。</p>";
   drawChart();
 }
 function updateTimer(){
@@ -124,13 +129,17 @@ $("start").onclick=()=>{if(!sbUser){alert("先にSupabaseへログインして�
   if(running)return; running=true; startedAt=Date.now(); tick=setInterval(updateTimer,250);
   $("start").disabled=true;$("stop").disabled=false;$("jazz").disabled=true;$("seller").disabled=true;
 };
-$("stop").onclick=()=>{
+$("stop").onclick=async ()=>{
   if(!running)return;
   const seconds=Math.max(1,Math.round((Date.now()-startedAt)/1000));
-  const d=new Date();
-  cloudRecord(seconds);
-  save(); running=false;clearInterval(tick);tick=null; $("timer").textContent="00:00:00";
-  $("start").disabled=false;$("stop").disabled=true;$("jazz").disabled=false;$("seller").disabled=false;render();
+  running=false;
+  clearInterval(tick);tick=null;
+  $("timer").textContent="00:00:00";
+  $("start").disabled=false;
+  $("stop").disabled=true;
+  $("jazz").disabled=false;
+  $("seller").disabled=false;
+  await cloudRecord(seconds);
 };
 $("clear").onclick=()=>{if(confirm("すべての記録を削除します。よろしいですか？")){logs=[];save();render()}};
 
@@ -160,8 +169,8 @@ function drawChart(){
   const data=days.map(d=>{
     const k=keyFromDate(d);
     return {
-      jazz:logs.filter(x=>x.date===k&&x.category==="jazz").reduce((a,x)=>a+x.seconds,0)/60,
-      seller:logs.filter(x=>x.date===k&&x.category==="seller").reduce((a,x)=>a+x.seconds,0)/60
+      jazz:logs.filter(x=>(x.date||x.practice_date)===k&&x.category==="jazz").reduce((a,x)=>a+x.seconds,0)/60,
+      seller:logs.filter(x=>(x.date||x.practice_date)===k&&x.category==="seller").reduce((a,x)=>a+x.seconds,0)/60
     };
   });
 
@@ -201,36 +210,101 @@ render();
 
 const SB_CFG="tsumikaeSBv1";
 let sb=null, sbUser=null;
-function sbMsg(t){const e=document.getElementById("sbStatus");if(e)e.textContent=t}
+
+function sbMsg(t){
+  const e=document.getElementById("sbStatus");
+  if(e)e.textContent=t;
+}
+
+function normalizeCloudRow(x){
+  const d=x.practice_date || (x.created_at ? new Date(x.created_at).toISOString().slice(0,10) : dateKey());
+  let time=x.time;
+  if(!time && x.created_at){
+    const dt=new Date(x.created_at);
+    time=dt.toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"});
+  }
+  return {...x,date:d,time:time||""};
+}
+
 function sbInit(){
   const c=JSON.parse(localStorage.getItem(SB_CFG)||"null");
   if(!c){sbMsg("☁️ 未接続");return;}
-  document.getElementById("sbUrl").value=c.url;document.getElementById("sbKey").value=c.key;
-  sb=window.supabase.createClient(c.url,c.key);sbMsg("☁️ 接続設定済み。ログインしてください。");
+  document.getElementById("sbUrl").value=c.url;
+  document.getElementById("sbKey").value=c.key;
+  sb=window.supabase.createClient(c.url,c.key);
+  sbMsg("☁️ 接続設定済み。ログインしてください。");
 }
+
 async function sbConnect(){
-  const url=document.getElementById("sbUrl").value.trim().replace(/\/$/,""),key=document.getElementById("sbKey").value.trim();
-  const email=document.getElementById("sbEmail").value.trim(),pw=document.getElementById("sbPassword").value;
-  if(!url||!key||!email||!pw){sbMsg("URL、Publishable key、メール、パスワードを入力してください。");return}
-  localStorage.setItem(SB_CFG,JSON.stringify({url,key}));sb=window.supabase.createClient(url,key);
+  const url=document.getElementById("sbUrl").value.trim().replace(/\/$/,"");
+  const key=document.getElementById("sbKey").value.trim();
+  const email=document.getElementById("sbEmail").value.trim();
+  const pw=document.getElementById("sbPassword").value;
+  if(!url||!key||!email||!pw){
+    sbMsg("URL、Publishable key、メール、パスワードを入力してください。");
+    return;
+  }
+  localStorage.setItem(SB_CFG,JSON.stringify({url,key}));
+  sb=window.supabase.createClient(url,key);
   const {data,error}=await sb.auth.signInWithPassword({email,password:pw});
   if(error){sbMsg("ログイン失敗："+error.message);return}
-  sbUser=data.user;sbMsg("☁️ ログイン済み。記録を読み込み中…");await cloudLoad();
+  sbUser=data.user;
+  sbMsg("☁️ ログイン済み。記録を読み込み中…");
+  await cloudLoad();
 }
-async function sbLogout(){if(sb)await sb.auth.signOut();sbUser=null;logs=[];sbMsg("☁️ ログアウトしました。");render()}
+
+async function sbLogout(){
+  if(sb)await sb.auth.signOut();
+  sbUser=null;
+  logs=[];
+  save();
+  sbMsg("☁️ ログアウトしました。");
+  render();
+}
+
 async function cloudLoad(){
   if(!sbUser)return;
-  const {data,error}=await sb.from("practice_logs").select("id,created_at,practice_date,category,seconds").order("created_at",{ascending:true});
+  const {data,error}=await sb
+    .from("practice_logs")
+    .select("id,created_at,practice_date,category,seconds")
+    .order("created_at",{ascending:true});
   if(error){sbMsg("読み込み失敗："+error.message);return}
-  logs=data||[];sbMsg("☁️ 同期済み");render();
+  logs=(data||[]).map(normalizeCloudRow);
+  save();
+  sbMsg("☁️ 同期済み");
+  render();
 }
+
 async function cloudRecord(sec){
-  if(!sbUser){alert("先にログインしてください。");return}
-  const row={user_id:sbUser.id,practice_date:dateKey(),category,seconds:sec};
-  const {data,error}=await sb.from("practice_logs").insert(row).select().single();
-  if(error){alert("クラウド保存に失敗しました："+error.message);return}
-  logs.push(data);render();sbMsg("☁️ 保存・同期しました");
+  if(!sbUser){
+    alert("先にSupabaseへログインしてください。");
+    return;
+  }
+
+  const row={
+    user_id:sbUser.id,
+    practice_date:dateKey(),
+    category,
+    seconds:sec
+  };
+
+  const {data,error}=await sb
+    .from("practice_logs")
+    .insert(row)
+    .select("id,created_at,practice_date,category,seconds")
+    .single();
+
+  if(error){
+    alert("クラウド保存に失敗しました："+error.message);
+    return;
+  }
+
+  logs.push(normalizeCloudRow(data));
+  save();
+  render();
+  sbMsg("☁️ 保存・同期しました");
 }
+
 document.getElementById("sbConnect").onclick=sbConnect;
 document.getElementById("sbLogout").onclick=sbLogout;
 sbInit();
