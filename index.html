@@ -226,13 +226,23 @@ function normalizeCloudRow(x){
   return {...x,date:d,time:time||""};
 }
 
-function sbInit(){
+async function sbInit(){
   const c=JSON.parse(localStorage.getItem(SB_CFG)||"null");
   if(!c){sbMsg("☁️ 未接続");return;}
   document.getElementById("sbUrl").value=c.url;
   document.getElementById("sbKey").value=c.key;
   sb=window.supabase.createClient(c.url,c.key);
-  sbMsg("☁️ 接続設定済み。ログインしてください。");
+
+  // Supabaseのログインセッションを自動復元する。
+  // メールアドレスやパスワードそのものは保存しない。
+  const {data,error}=await sb.auth.getSession();
+  if(!error && data.session){
+    sbUser=data.session.user;
+    sbMsg("☁️ 同期済み");
+    await cloudLoad();
+  }else{
+    sbMsg("☁️ 接続設定済み。初回のみログインしてください。");
+  }
 }
 
 async function sbConnect(){
