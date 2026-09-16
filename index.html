@@ -141,7 +141,28 @@ $("stop").onclick=async ()=>{
   $("seller").disabled=false;
   await cloudRecord(seconds);
 };
-$("clear").onclick=()=>{if(confirm("すべての記録を削除します。よろしいですか？")){logs=[];save();render()}};
+$("clear").onclick=async ()=>{
+  if(!confirm("すべての記録を削除します。よろしいですか？")) return;
+  if(!sbUser){
+    alert("Supabaseにログインしてから削除してください。");
+    return;
+  }
+
+  const {error}=await sb
+    .from("practice_logs")
+    .delete()
+    .eq("user_id",sbUser.id);
+
+  if(error){
+    alert("クラウド上の記録を削除できませんでした："+error.message);
+    return;
+  }
+
+  logs=[];
+  save();
+  render();
+  sbMsg("☁️ すべての記録を削除しました");
+};
 
 function startOfWeek(d){
   const x=new Date(d); const day=x.getDay(); // 日曜=0
